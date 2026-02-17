@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WV Smart Route Builder v50 (Proximity Fix)</title>
+    <title>WV Smart Route Builder v51 (Measure Priority)</title>
     <style>
         :root { --wv-gold: #E2A600; --wv-blue: #002855; --bg-gray: #f4f4f9; }
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: var(--bg-gray); margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
@@ -44,13 +44,13 @@
 <body>
 
 <div class="container">
-    <h1>WV Smart Route Builder v50 (Proximity Fix)</h1>
-    <p>Advanced Scoring: Penalizes "Intersection/At/From" heavily when adjacent to route names.</p>
+    <h1>WV Smart Route Builder v51 (Measure Priority)</h1>
+    <p>Prioritizes <strong>Explicit Text Measures</strong> and ignores road names inside quotes (dedication names).</p>
     
     <div class="grid">
         <div>
             <h3>1. Resolution Text</h3>
-            <textarea id="inputText" placeholder="Paste resolution text here...&#10;Example: 'Name the one-mile section of road on Lick Creek Road, beginning at Route 119'"></textarea>
+            <textarea id="inputText" placeholder="Paste resolution text here...&#10;Example: 'Name U.S. Route 60 from Mile Post 31.50 to Mile Post 40.00 the “Lou Tabit Highway”'"></textarea>
             <button onclick="runCompleteAnalysis()">Analyze & Process</button>
             
             <div style="margin-top: 25px;">
@@ -172,8 +172,7 @@
             return;
         }
 
-        // --- WINNER SELECTION ---
-        const subject = context.candidates[0]; // Already sorted by Score
+        const subject = context.candidates[0]; // Winner
         let stem = null;
 
         if (subject.type === "NAME") {
@@ -193,11 +192,8 @@
             stem = `${context.countyCode}${subject.ssCode}${subject.num.padStart(4,'0')}0000`;
             log(`Winner: ${subject.label} (Score: ${subject.score})`);
             
-            // Validation Loop: State -> County -> US
             let verified = await verifyLrsId(stem);
-            
             if (!verified && subject.ssName.includes("Generic")) {
-                // Try County
                 log(`State Route failed. Trying County Route...`, 'warning');
                 const countyStem = `${context.countyCode}4${subject.num.padStart(4,'0')}0000`;
                 verified = await verifyLrsId(countyStem);
@@ -205,7 +201,6 @@
                     stem = countyStem;
                     log(`✔ County Route Confirmed: ${stem}`, 'success');
                 } else {
-                    // Try US Route (System 2)
                     log(`County Route failed. Trying US Route...`, 'warning');
                     const usStem = `${context.countyCode}2${subject.num.padStart(4,'0')}0000`;
                     verified = await verifyLrsId(usStem);
@@ -227,7 +222,6 @@
 
         document.getElementById('finalRouteID').textContent = `${stem}??`;
         
-        // Prepare intersect candidates
         let intersectCandidates = context.candidates.filter(c => c !== subject);
         
         await verifyAndMeasure(stem, context, text, intersectCandidates);
@@ -245,7 +239,7 @@
         } catch(e) { return false; }
     }
 
-    // --- SAMS LOGIC (Unchanged) ---
+    // --- SAMS / GEOCODE LOGIC (UNTOUCHED) ---
     async function resolveRouteByDualSearch(name, countyCode) {
         const suffixes = ["ROAD","RD","DRIVE","DR","STREET","ST","AVENUE","AVE","BOULEVARD","BLVD","LANE","LN","WAY","PIKE","HIGHWAY","HWY"];
         const upperName = name.toUpperCase();
@@ -342,7 +336,6 @@
         return null;
     }
 
-    // --- PROXIMITY CONTEXT ENGINE (V50) ---
     function analyzeContext(text) {
         const clean = text.replace(/\s+/g, ' ').toUpperCase();
         let countyName=null, countyCode=null;
@@ -351,31 +344,28 @@
 
         let candidates = [];
 
-        // Helper: Calculate Score based on Proximity
-        const calcScore = (index) => {
-            const preText = text.substring(Math.max(0, index - 60), index).toLowerCase();
-            let s = 0;
-            
-            // Subject: "Name the..."
-            if (/name|designate|dedicate|portion of|section of|stretch of|road on/.test(preText)) s += 100;
-            
-            // Object: "At", "From", "Intersection"
-            // Proximity Check: If these words are VERY close (last 15 chars), HUGE penalty
-            const immediatePre = text.substring(Math.max(0, index - 15), index).toLowerCase();
-            if (/at\s*$|from\s*$|with\s*$|and\s*$|between\s*$/.test(immediatePre)) {
-                s -= 500; // Immediate disqualification
-            } else if (/intersection|junction|beginning|ending/.test(preText)) {
-                s -= 50; // General context penalty
-            }
-            return s;
-        };
+        // 1. Extract Quoted Text (New in V51)
+        const quotedRegex = /["“”](.*?)["“”]/g;
+        let quotedNames = [];
+        let match;
+        while ((match = quotedRegex.exec(text)) !== null) {
+            quotedNames.push(match[1].toUpperCase());
+        }
 
-        // 1. Numbered Routes
+        // 2. Numbered Routes
         const routeRegex = /(?:(U\.?\s*S\.?|United\s+States|State|WV|West\s+Virginia|County|CR|CO|I-|Interstate)\s+)?(?:Route|Hwy|Road|Highway)\s*(\d+)/gi;
         const matches = [...text.matchAll(routeRegex)];
         for (const m of matches) {
             const fullMatch = m[0]; const prefix = m[1] ? m[1].toUpperCase().replace(/\s/g, '') : ""; const num = m[2]; 
-            const score = calcScore(m.index);
+            const index = m.index;
+            const preText = text.substring(Math.max(0, index - 60), index).toLowerCase();
+            
+            let score = 0;
+            if (/name|designate|dedicate|portion of|section of|stretch of|road on/.test(preText)) score += 100;
+            const immediatePre = text.substring(Math.max(0, index - 15), index).toLowerCase();
+            if (/at\s*$|from\s*$|with\s*$|and\s*$|between\s*$/.test(immediatePre)) s = -500;
+            else if (/intersection|junction|beginning|ending/.test(preText)) score -= 50;
+            
             let ssCode = '4'; let ssName = 'County';
             if (prefix.includes("COUNTY") || prefix === "CR" || prefix === "CO") { ssCode = '4'; ssName = "County"; }
             else if (prefix.includes("U.S") || prefix === "US") { ssCode = '2'; ssName = "US"; }
@@ -385,13 +375,22 @@
             candidates.push({ type: "NUMBER", num, ssCode, ssName, label: fullMatch, score });
         }
 
-        // 2. Named Roads (Relaxed Regex)
+        // 3. Named Roads
         const nameRegex = /([A-Z][a-zA-Z\.]+(?:\s+[A-Z][a-zA-Z\.]+)*\s+(?:Road|Rd|Drive|Dr|Street|St|Avenue|Ave|Boulevard|Blvd|Pike|Highway|Hwy))/g;
         const nameMatches = [...text.matchAll(nameRegex)];
         for (const nm of nameMatches) {
             const name = nm[1];
+            // IGNORE if inside quotes (Likely the new name being assigned)
+            if (quotedNames.some(q => q.includes(name.toUpperCase()))) continue;
+
             if (!name.toUpperCase().startsWith("COUNTY") && !name.toUpperCase().startsWith("STATE") && !name.toUpperCase().startsWith("WEST")) {
-                const score = calcScore(nm.index);
+                const index = nm.index;
+                const preText = text.substring(Math.max(0, index - 60), index).toLowerCase();
+                let score = 0;
+                if (/name|designate|dedicate|portion of|section of|stretch of|road on/.test(preText)) score += 100;
+                const immediatePre = text.substring(Math.max(0, index - 15), index).toLowerCase();
+                if (/at\s*$|from\s*$|with\s*$|and\s*$|between\s*$/.test(immediatePre)) s = -500;
+                else if (/intersection|junction|beginning|ending/.test(preText)) score -= 50;
                 candidates.push({ type: "NAME", label: name, score });
             }
         }
@@ -400,7 +399,6 @@
         return { countyName, countyCode, candidates };
     }
 
-    // --- VERIFY AND MEASURE (UNCHANGED) ---
     async function verifyAndMeasure(searchStem, context, originalText, intersectCandidates) {
         const statusBox = document.getElementById('lrsStatus');
         const dbBox = document.getElementById('dbMatchBox');
@@ -454,15 +452,21 @@
         const lower = text.toLowerCase();
         let candidates = [];
 
-        const offsetRegex = /(?:(\d+(?:\.\d+)?)|(one|two|three|four|five|six|seven|eight|nine|ten))\s*-?\s*miles?\s+(?:section|stretch|portion|distance)?/i;
-        const offsetMatch = lower.match(offsetRegex);
-        let detectedOffset = 0;
-        if (offsetMatch) {
-            const wordMap = {"one":1, "two":2, "three":3, "four":4, "five":5};
-            detectedOffset = offsetMatch[1] ? parseFloat(offsetMatch[1]) : wordMap[offsetMatch[2]];
-            log(`Detected Offset: ${detectedOffset} miles`, 'success');
+        // 1. TEXT EXTRACTION (PRIORITY 1 - MOVED UP)
+        const mpRegex = /(?:mile\s*(?:post|point|marker)|mp|m\.p\.)\s*(\d+(?:\.\d+)?)/gi;
+        const textMatches = [...lower.matchAll(mpRegex)].map(m => parseFloat(m[1]));
+        if (textMatches.length > 0) {
+            textMatches.sort((a,b) => a-b);
+            let tMin = textMatches[0];
+            let tMax = textMatches.length > 1 ? textMatches[textMatches.length-1] : tMin;
+            // Immediate Return if found
+            beginInput.value = tMin.toFixed(3);
+            endInput.value = tMax.toFixed(3);
+            logicOut.innerHTML = `<span class='success'>✔ Found Explicit Text Measures: ${tMin} - ${tMax}</span>`;
+            return; // Skip intersections if we have explicit numbers
         }
 
+        // 2. INTERSECTIONS (PRIORITY 2)
         if (otherRoutes.length > 0) {
             log("Checking intersections...", 'warning');
             let ranges = [];
@@ -492,13 +496,7 @@
                 let startM = ranges[0].max; let endM = ranges[ranges.length-1].min;     
                 if (startM > endM) { startM = ranges[0].min; endM = ranges[ranges.length-1].max; }
                 candidates.push({min: startM, max: endM, source:"Trimmed Intersections", priority: 20});
-            } else if (ranges.length === 1 && detectedOffset > 0) {
-                let start = ranges[0].center; 
-                let end = start + detectedOffset;
-                if (end > gMax) { log("Offset exceeds route end, trying reverse...", 'warning'); end = start - detectedOffset; }
-                if(start > end) { let temp=start; start=end; end=temp; }
-                candidates.push({min: start, max: end, source:"Intersection + Offset", priority: 25});
-            }
+            } 
         }
 
         candidates.sort((a,b) => b.priority - a.priority);

@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WV Smart Route Builder v50 (Proximity Fix)</title>
+    <style>
+        :root { --wv-gold: #E2A600; --wv-blue: #002855; --bg-gray: #f4f4f9; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: var(--bg-gray); margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        .container { background: white; width: 95%; max-width: 1200px; padding: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        h1 { color: var(--wv-blue); border-bottom: 3px solid var(--wv-gold); padding-bottom: 10px; margin-top: 0; }
+        
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 25px; }
+        textarea { width: 100%; height: 120px; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-family: monospace; resize: vertical; }
+        
+        button { background-color: var(--wv-blue); color: white; border: none; padding: 12px 24px; font-size: 16px; border-radius: 4px; cursor: pointer; margin-top: 10px; transition: background 0.2s; }
+        button:hover { background-color: #004080; }
+        
+        .result-box { background: #eef; padding: 20px; border-radius: 4px; border-left: 5px solid var(--wv-blue); }
+        .measure-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 15px; background: #fff; padding: 10px; border: 1px solid #ddd; }
+        .measure-box { display: flex; flex-direction: column; }
+        .measure-box label { font-size: 0.85em; font-weight: bold; color: #555; }
+        .measure-box input { padding: 5px; font-family: monospace; border: 1px solid #ccc; font-weight: bold; color: #002855; }
+        
+        .config-panel { background: #fff3cd; padding: 10px; border-radius: 4px; border: 1px solid #ffeeba; margin-bottom: 10px; font-size: 0.85em; }
+        .code-display { font-family: monospace; font-size: 1.4em; letter-spacing: 1px; background: #333; color: #0f0; padding: 10px; border-radius: 4px; margin-top: 10px; display: inline-block; width: 100%; text-align: center; box-sizing: border-box;}
+        
+        .status { font-weight: bold; margin-top: 10px; }
+        .success { color: green; }
+        .error { color: #d9534f; }
+        .warning { color: #f0ad4e; }
+
+        #debugConsole {
+            width: 100%; height: 250px; background: #000; color: #0f0; 
+            font-family: monospace; padding: 10px; margin-top: 20px; 
+            overflow-y: auto; font-size: 0.85em; border-radius: 4px; border: 2px solid #444;
+        }
+        
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: var(--wv-blue); color: white; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>WV Smart Route Builder v50 (Proximity Fix)</h1>
+    <p>Advanced Scoring: Penalizes "Intersection/At/From" heavily when adjacent to route names.</p>
+    
+    <div class="grid">
+        <div>
+            <h3>1. Resolution Text</h3>
+            <textarea id="inputText" placeholder="Paste resolution text here...&#10;Example: 'Name the one-mile section of road on Lick Creek Road, beginning at Route 119'"></textarea>
+            <button onclick="runCompleteAnalysis()">Analyze & Process</button>
+            
+            <div style="margin-top: 25px;">
+                <h3>3. Smart Measure Extraction</h3>
+                <div class="measure-grid">
+                    <div class="measure-box">
+                        <label>Begin Milepoint</label>
+                        <input type="text" id="beginMile" placeholder="0.000">
+                    </div>
+                    <div class="measure-box">
+                        <label>End Milepoint</label>
+                        <input type="text" id="endMile" placeholder="0.000">
+                    </div>
+                </div>
+                <div id="measureLogicOutput" style="font-size: 0.9em; margin-top: 8px; color: #666; font-style: italic;">
+                    Waiting for analysis...
+                </div>
+            </div>
+        </div>
+        
+        <div>
+            <h3>2. Configuration & Results</h3>
+            
+            <div class="config-panel">
+                <strong>Service Configuration</strong><br>
+                <em>Primary:</em> WVDOT SAMS (Layer 118)<br>
+                <em>Secondary:</em> WV GIS Tech Center
+            </div>
+
+            <div id="resultArea" class="result-box" style="display:none;">
+                <table id="compTable"></table>
+                
+                <div style="margin-top: 15px;">
+                    <strong>Generated Route ID:</strong><br>
+                    <span id="finalRouteID" class="code-display">WAITING...</span>
+                </div>
+
+                <div id="gisCheck" style="margin-top: 15px; border-top: 1px solid #ccc; padding-top: 10px;">
+                    <strong>LRS Verification (Layer 89):</strong><br>
+                    <span id="lrsStatus">Pending...</span>
+                    <div id="dbMatchBox"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="debugConsole">System Ready...</div>
+</div>
+
+<script>
+    // --- CONFIGURATION ---
+    const LRS_LAYER_URL = "https://gis.transportation.wv.gov/arcgis/rest/services/Roads_And_Highways/Publication_LRS/FeatureServer/89";
+    const SAMS_LAYER_URL = "https://gis.transportation.wv.gov/arcgis/rest/services/Roads_And_Highways/Publication_LRS/FeatureServer/118";
+    const GEOCODE_SERVICE_URL = "https://oehsportal.wvdhhr.org/arcgis/rest/services/Geocode/WV_Composite/GeocodeServer";
+
+    // --- DATABASE ---
+    const COUNTY_CODES = { "BARBOUR":"01", "BERKELEY":"02", "BOONE":"03", "BRAXTON":"04", "BROOKE":"05", "CABELL":"06", "CALHOUN":"07", "CLAY":"08", "DODDRIDGE":"09", "FAYETTE":"10", "GILMER":"11", "GRANT":"12", "GREENBRIER":"13", "HAMPSHIRE":"14", "HANCOCK":"15", "HARDY":"16", "HARRISON":"17", "JACKSON":"18", "JEFFERSON":"19", "KANAWHA":"20", "LEWIS":"21", "LINCOLN":"22", "LOGAN":"23", "MCDOWELL":"24", "MARION":"25", "MARSHALL":"26", "MASON":"27", "MERCER":"28", "MINERAL":"29", "MINGO":"30", "MONONGALIA":"31", "MONROE":"32", "MORGAN":"33", "NICHOLAS":"34", "OHIO":"35", "PENDLETON":"36", "PLEASANTS":"37", "POCAHONTAS":"38", "PRESTON":"39", "PUTNAM":"40", "RALEIGH":"41", "RANDOLPH":"42", "RITCHIE":"43", "ROANE":"44", "SUMMERS":"45", "TAYLOR":"46", "TUCKER":"47", "TYLER":"48", "UPSHUR":"49", "WAYNE":"50", "WEBSTER":"51", "WETZEL":"52", "WIRT":"53", "WOOD":"54", "WYOMING":"55" };
+    const WV_TOWNS = { "PRINCETON": "MERCER", "BLUEFIELD": "MERCER", "KEYSER": "MINERAL", "PIEDMONT": "MINERAL", "ELK GARDEN": "MINERAL", "CHARLESTON": "KANAWHA", "HUNTINGTON": "CABELL", "MORGANTOWN": "MONONGALIA", "PARKERSBURG": "WOOD", "WHEELING": "OHIO", "BECKLEY": "RALEIGH", "FAIRMONT": "MARION", "CLARKSBURG": "HARRISON", "MARTINSBURG": "BERKELEY", "WEIRTON": "HANCOCK", "ELKINS": "RANDOLPH", "BUCKHANNON": "UPSHUR", "LEWISBURG": "GREENBRIER", "SUMMERSVILLE": "NICHOLAS", "OAK HILL": "FAYETTE", "POINT PLEASANT": "MASON", "RIPLEY": "JACKSON", "CHAPMANVILLE": "LOGAN", "LOGAN": "LOGAN", "MAN": "LOGAN", "WILLIAMSON": "MINGO", "WELCH": "MCDOWELL", "HINTON": "SUMMERS", "SUTTON": "BRAXTON", "CLAY": "CLAY", "SPENCER": "ROANE", "NEW MARTINSVILLE": "WETZEL" };
+
+    function log(msg, type='info') {
+        const c = document.getElementById('debugConsole');
+        const time = new Date().toLocaleTimeString();
+        const color = type === 'error' ? '#ff4444' : type === 'success' ? '#00ff00' : type === 'warning' ? '#ffaa00' : '#cccccc';
+        c.innerHTML += `<div style="color:${color}">[${time}] ${msg}</div>`;
+        c.scrollTop = c.scrollHeight;
+    }
+
+    async function executeLayerQuery(url, params) {
+        const formData = new URLSearchParams();
+        formData.append('f', 'json');
+        for (const key in params) {
+            const val = typeof params[key] === 'object' ? JSON.stringify(params[key]) : params[key];
+            formData.append(key, val);
+        }
+        try {
+            const resp = await fetch(url + "/query", { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: formData });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            if (data.error) throw new Error(`GIS Error: ${data.error.message}`);
+            return data;
+        } catch (e) { throw e; }
+    }
+
+    async function executeGeocode(url, params) {
+        const queryStr = new URLSearchParams({ ...params, f: 'json' }).toString();
+        try {
+            const resp = await fetch(`${url}/findAddressCandidates?${queryStr}`, { method: 'GET' });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            return await resp.json();
+        } catch (e) { throw e; }
+    }
+
+    async function runCompleteAnalysis() {
+        const text = document.getElementById('inputText').value;
+        const resultDiv = document.getElementById('resultArea');
+        const lrsStatus = document.getElementById('lrsStatus');
+        const dbBox = document.getElementById('dbMatchBox');
+        
+        resultDiv.style.display = 'block';
+        lrsStatus.innerHTML = '<span class="warning">Querying GIS...</span>';
+        dbBox.innerHTML = '';
+        document.getElementById('measureLogicOutput').innerHTML = 'Analyzing...';
+        document.getElementById('beginMile').value = '';
+        document.getElementById('endMile').value = '';
+        
+        document.getElementById('debugConsole').innerHTML = "<div>Starting New Analysis...</div>";
+
+        const context = analyzeContext(text);
+        renderTable(context);
+        
+        if (!context.countyCode) {
+            lrsStatus.innerHTML = `<span class="error">✘ COUNTY UNKNOWN</span>`;
+            log("Error: Could not determine County Code.", 'error');
+            return;
+        }
+
+        if (context.candidates.length === 0) {
+            log("No identifiable route found.", 'error');
+            return;
+        }
+
+        // --- WINNER SELECTION ---
+        const subject = context.candidates[0]; // Already sorted by Score
+        let stem = null;
+
+        if (subject.type === "NAME") {
+            log(`Winner: "${subject.label}" (Score: ${subject.score})`);
+            log(`Resolving Route ID for "${subject.label}"...`);
+            const nameResult = await resolveRouteByDualSearch(subject.label, context.countyCode);
+            if (nameResult) {
+                stem = nameResult.stem;
+                log(`Road Name Resolved to Route ID: ${stem}`, 'success');
+                subject.resolvedId = stem;
+            } else {
+                log(`Resolution failed for: ${subject.label}`, 'error');
+                return;
+            }
+        } else {
+            // Numbered Route
+            stem = `${context.countyCode}${subject.ssCode}${subject.num.padStart(4,'0')}0000`;
+            log(`Winner: ${subject.label} (Score: ${subject.score})`);
+            
+            // Validation Loop: State -> County -> US
+            let verified = await verifyLrsId(stem);
+            
+            if (!verified && subject.ssName.includes("Generic")) {
+                // Try County
+                log(`State Route failed. Trying County Route...`, 'warning');
+                const countyStem = `${context.countyCode}4${subject.num.padStart(4,'0')}0000`;
+                verified = await verifyLrsId(countyStem);
+                if (verified) {
+                    stem = countyStem;
+                    log(`✔ County Route Confirmed: ${stem}`, 'success');
+                } else {
+                    // Try US Route (System 2)
+                    log(`County Route failed. Trying US Route...`, 'warning');
+                    const usStem = `${context.countyCode}2${subject.num.padStart(4,'0')}0000`;
+                    verified = await verifyLrsId(usStem);
+                    if (verified) {
+                        stem = usStem;
+                        log(`✔ US Route Confirmed: ${stem}`, 'success');
+                    }
+                }
+            } else if (verified) {
+                log(`✔ Route Confirmed: ${stem}`, 'success');
+            }
+            
+            if(!verified) {
+                log(`❌ Primary Route ${stem} not found in GIS.`, 'error');
+                lrsStatus.innerHTML = `<span class="error">✘ ROUTE NOT FOUND</span>`;
+                return;
+            }
+        }
+
+        document.getElementById('finalRouteID').textContent = `${stem}??`;
+        
+        // Prepare intersect candidates
+        let intersectCandidates = context.candidates.filter(c => c !== subject);
+        
+        await verifyAndMeasure(stem, context, text, intersectCandidates);
+    }
+
+    async function verifyLrsId(routeId) {
+        try {
+            const stem = routeId.substring(0,11);
+            const data = await executeLayerQuery(LRS_LAYER_URL, {
+                where: `CO_ROUTEID LIKE '${stem}%'`,
+                outFields: 'CO_ROUTEID',
+                returnGeometry: false
+            });
+            return (data.features && data.features.length > 0) ? true : false;
+        } catch(e) { return false; }
+    }
+
+    // --- SAMS LOGIC (Unchanged) ---
+    async function resolveRouteByDualSearch(name, countyCode) {
+        const suffixes = ["ROAD","RD","DRIVE","DR","STREET","ST","AVENUE","AVE","BOULEVARD","BLVD","LANE","LN","WAY","PIKE","HIGHWAY","HWY"];
+        const upperName = name.toUpperCase();
+        let coreName = upperName;
+        suffixes.forEach(s => { if(coreName.endsWith(" " + s)) coreName = coreName.slice(0, -(s.length + 1)).trim(); });
+        
+        log(`Searching SAMS (Layer 118) for "${coreName}"...`);
+        try {
+            const samsData = await executeLayerQuery(SAMS_LAYER_URL, {
+                where: `UPPER(STREET_NAME) LIKE '%${coreName}%'`,
+                outFields: 'ROUTE_ID,STREET_NAME',
+                returnGeometry: true,
+                outSR: 3857
+            });
+
+            if (samsData.features && samsData.features.length > 0) {
+                const candidates = samsData.features
+                    .filter(f => f.attributes.ROUTE_ID && f.attributes.ROUTE_ID.toString().startsWith(countyCode))
+                    .map(f => {
+                        const id = f.attributes.ROUTE_ID;
+                        const sName = f.attributes.STREET_NAME.toUpperCase();
+                        let length = 0;
+                        if (f.geometry.paths) {
+                            f.geometry.paths.forEach(path => {
+                                for(let i=0; i<path.length-1; i++) {
+                                    length += Math.sqrt(Math.pow(path[i+1][0]-path[i][0], 2) + Math.pow(path[i+1][1]-path[i][1], 2));
+                                }
+                            });
+                        }
+                        let score = 0;
+                        if (sName === upperName || sName === (coreName + " RD") || sName === (coreName + " ROAD")) score = 100;
+                        else if (sName.startsWith(coreName)) score = 50;
+                        else score = 10;
+                        return { id: id, name: f.attributes.STREET_NAME, score: score, length: length, geom: f.geometry };
+                    });
+
+                if (candidates.length > 0) {
+                    candidates.sort((a,b) => {
+                        if (b.score !== a.score) return b.score - a.score;
+                        return b.length - a.length; 
+                    });
+                    const winner = candidates[0];
+                    log(`Winner (Longest): ${winner.name} (${winner.id})`, 'success');
+                    if (await verifyLrsId(winner.id)) return { stem: winner.id.substring(0,11) + "00", label: winner.name };
+                    return await intersectGeometryToLRS(winner.geom, coreName, winner.id);
+                }
+            }
+        } catch (e) { log(`SAMS Search Error: ${e.message}`, 'warning'); }
+        return await resolveRouteByGeocode(name, countyCode, coreName);
+    }
+
+    async function resolveRouteByGeocode(name, countyCode, cleanName) {
+        const countyName = Object.keys(COUNTY_CODES).find(key => COUNTY_CODES[key] === countyCode);
+        const searchText = `${name}, ${countyName} County, WV`;
+        try {
+            log(`Searching WV Composite: "${searchText}"...`);
+            const data = await executeGeocode(GEOCODE_SERVICE_URL, { SingleLine: searchText, outSR: 3857, maxLocations: 1 });
+            if (data.candidates && data.candidates.length > 0) {
+                const loc = data.candidates[0].location;
+                const point = { x: loc.x, y: loc.y, spatialReference: { wkid: 3857 } };
+                return await intersectGeometryToLRS(point, cleanName, null);
+            }
+            return null;
+        } catch (e) { return null; }
+    }
+
+    async function intersectGeometryToLRS(geometry, targetName, authorityId) {
+        const buffer = 50; 
+        let queryGeom = geometry;
+        if (geometry.x) { queryGeom = { xmin: geometry.x-buffer, ymin: geometry.y-buffer, xmax: geometry.x+buffer, ymax: geometry.y+buffer, spatialReference: { wkid: 3857 } }; }
+
+        const lrsData = await executeLayerQuery(LRS_LAYER_URL, {
+            geometry: queryGeom,
+            geometryType: geometry.x ? 'esriGeometryEnvelope' : 'esriGeometryPolyline',
+            spatialRel: 'esriSpatialRelIntersects',
+            outFields: 'CO_ROUTEID,CO_RouteLabel',
+            returnGeometry: false
+        });
+
+        if (lrsData.features && lrsData.features.length > 0) {
+            if (authorityId) {
+                const idMatch = lrsData.features.find(f => f.attributes.CO_ROUTEID.startsWith(authorityId.substring(0,11)));
+                if (idMatch) return { stem: idMatch.attributes.CO_ROUTEID.substring(0, 11) + "00", label: idMatch.attributes.CO_RouteLabel };
+            }
+            const nameMatch = lrsData.features.find(f => f.attributes.CO_RouteLabel && f.attributes.CO_RouteLabel.toUpperCase().includes(targetName));
+            if (nameMatch) return { stem: nameMatch.attributes.CO_ROUTEID.substring(0, 11) + "00", label: nameMatch.attributes.CO_RouteLabel };
+            lrsData.features.sort((a,b) => {
+                const idA = a.attributes.CO_ROUTEID; const idB = b.attributes.CO_ROUTEID;
+                return (idB.slice(-2)==='00'?1:0) - (idA.slice(-2)==='00'?1:0);
+            });
+            const match = lrsData.features[0];
+            return { stem: match.attributes.CO_ROUTEID.substring(0, 11) + "00", label: match.attributes.CO_RouteLabel };
+        }
+        return null;
+    }
+
+    // --- PROXIMITY CONTEXT ENGINE (V50) ---
+    function analyzeContext(text) {
+        const clean = text.replace(/\s+/g, ' ').toUpperCase();
+        let countyName=null, countyCode=null;
+        for (const [name, code] of Object.entries(COUNTY_CODES)) { if (clean.includes(name + " COUNTY")) { countyName = name; countyCode = code; break; } }
+        if (!countyCode) { for (const [town, mappedCounty] of Object.entries(WV_TOWNS)) { if (new RegExp(`\\b${town}\\b`).test(clean)) { countyName = mappedCounty; countyCode = COUNTY_CODES[mappedCounty]; break; } } }
+
+        let candidates = [];
+
+        // Helper: Calculate Score based on Proximity
+        const calcScore = (index) => {
+            const preText = text.substring(Math.max(0, index - 60), index).toLowerCase();
+            let s = 0;
+            
+            // Subject: "Name the..."
+            if (/name|designate|dedicate|portion of|section of|stretch of|road on/.test(preText)) s += 100;
+            
+            // Object: "At", "From", "Intersection"
+            // Proximity Check: If these words are VERY close (last 15 chars), HUGE penalty
+            const immediatePre = text.substring(Math.max(0, index - 15), index).toLowerCase();
+            if (/at\s*$|from\s*$|with\s*$|and\s*$|between\s*$/.test(immediatePre)) {
+                s -= 500; // Immediate disqualification
+            } else if (/intersection|junction|beginning|ending/.test(preText)) {
+                s -= 50; // General context penalty
+            }
+            return s;
+        };
+
+        // 1. Numbered Routes
+        const routeRegex = /(?:(U\.?\s*S\.?|United\s+States|State|WV|West\s+Virginia|County|CR|CO|I-|Interstate)\s+)?(?:Route|Hwy|Road|Highway)\s*(\d+)/gi;
+        const matches = [...text.matchAll(routeRegex)];
+        for (const m of matches) {
+            const fullMatch = m[0]; const prefix = m[1] ? m[1].toUpperCase().replace(/\s/g, '') : ""; const num = m[2]; 
+            const score = calcScore(m.index);
+            let ssCode = '4'; let ssName = 'County';
+            if (prefix.includes("COUNTY") || prefix === "CR" || prefix === "CO") { ssCode = '4'; ssName = "County"; }
+            else if (prefix.includes("U.S") || prefix === "US") { ssCode = '2'; ssName = "US"; }
+            else if (prefix.includes("INTERSTATE") || prefix === "I-") { ssCode = '1'; ssName = "Interstate"; }
+            else if (prefix.includes("STATE") || prefix.includes("WV") || prefix.includes("VIRGINIA")) { ssCode = '3'; ssName = "State"; }
+            else { ssCode = '3'; ssName = "State (Generic)"; } 
+            candidates.push({ type: "NUMBER", num, ssCode, ssName, label: fullMatch, score });
+        }
+
+        // 2. Named Roads (Relaxed Regex)
+        const nameRegex = /([A-Z][a-zA-Z\.]+(?:\s+[A-Z][a-zA-Z\.]+)*\s+(?:Road|Rd|Drive|Dr|Street|St|Avenue|Ave|Boulevard|Blvd|Pike|Highway|Hwy))/g;
+        const nameMatches = [...text.matchAll(nameRegex)];
+        for (const nm of nameMatches) {
+            const name = nm[1];
+            if (!name.toUpperCase().startsWith("COUNTY") && !name.toUpperCase().startsWith("STATE") && !name.toUpperCase().startsWith("WEST")) {
+                const score = calcScore(nm.index);
+                candidates.push({ type: "NAME", label: name, score });
+            }
+        }
+
+        candidates.sort((a,b) => b.score - a.score);
+        return { countyName, countyCode, candidates };
+    }
+
+    // --- VERIFY AND MEASURE (UNCHANGED) ---
+    async function verifyAndMeasure(searchStem, context, originalText, intersectCandidates) {
+        const statusBox = document.getElementById('lrsStatus');
+        const dbBox = document.getElementById('dbMatchBox');
+        let validRouteId = null;
+        let routeFeatures = null;
+
+        log(`Querying LRS for Primary Route...`);
+        try {
+            const data = await executeLayerQuery(LRS_LAYER_URL, {
+                where: `CO_ROUTEID LIKE '${searchStem}%'`,
+                outFields: 'CO_ROUTEID,CO_RouteLabel',
+                returnGeometry: true, returnM: true, outSR: 3857
+            });
+
+            if (data.features && data.features.length > 0) {
+                data.features.sort((a, b) => {
+                    const idA = a.attributes.CO_ROUTEID; const idB = b.attributes.CO_ROUTEID;
+                    return (idB.slice(-2)==='00'?3:1) - (idA.slice(-2)==='00'?3:1);
+                });
+                const feat = data.features[0]; 
+                validRouteId = feat.attributes.CO_ROUTEID; 
+                routeFeatures = [feat]; 
+
+                statusBox.innerHTML = `<span class="success">✔ VALIDATED</span>`;
+                dbBox.innerHTML = `<div class="success">Primary: ${validRouteId}<br>Label: ${feat.attributes.CO_RouteLabel}</div>`;
+                document.getElementById('finalRouteID').textContent = validRouteId;
+                log(`Locked Primary Route: ${validRouteId}`, 'success');
+                
+                await runDetectionLogic(originalText, routeFeatures, validRouteId, context.countyCode, intersectCandidates);
+            } else {
+                statusBox.innerHTML = `<span class="error">✘ ROUTE NOT FOUND</span>`;
+                log("Primary Route not found in GIS.", 'error');
+            }
+        } catch (err) { log(`Critical Error: ${err.message}`, 'error'); }
+    }
+
+    async function runDetectionLogic(text, routeFeatures, mainRouteId, countyCode, otherRoutes) {
+        const logicOut = document.getElementById('measureLogicOutput');
+        const beginInput = document.getElementById('beginMile');
+        const endInput = document.getElementById('endMile');
+        const sanitize = (num) => Math.max(0, num).toFixed(3);
+        
+        let gMin = 99999, gMax = -99999;
+        routeFeatures.forEach(f => f.geometry.paths.forEach(p => p.forEach(pt => {
+            let m = pt[pt.length-1];
+            if (m < gMin) gMin = m;
+            if (m > gMax) gMax = m;
+        })));
+        log(`Global Extents: ${sanitize(gMin)} - ${sanitize(gMax)}`);
+
+        const lower = text.toLowerCase();
+        let candidates = [];
+
+        const offsetRegex = /(?:(\d+(?:\.\d+)?)|(one|two|three|four|five|six|seven|eight|nine|ten))\s*-?\s*miles?\s+(?:section|stretch|portion|distance)?/i;
+        const offsetMatch = lower.match(offsetRegex);
+        let detectedOffset = 0;
+        if (offsetMatch) {
+            const wordMap = {"one":1, "two":2, "three":3, "four":4, "five":5};
+            detectedOffset = offsetMatch[1] ? parseFloat(offsetMatch[1]) : wordMap[offsetMatch[2]];
+            log(`Detected Offset: ${detectedOffset} miles`, 'success');
+        }
+
+        if (otherRoutes.length > 0) {
+            log("Checking intersections...", 'warning');
+            let ranges = [];
+            for (const other of otherRoutes) {
+                let stemsToTry = [];
+                if (other.type === "NAME") {
+                    log(`Resolving intersection with Name: ${other.label}`);
+                    const nameRes = await resolveRouteByDualSearch(other.label, countyCode);
+                    if (nameRes) stemsToTry.push(nameRes.stem);
+                } else {
+                    const build = (type) => `${countyCode}${type}${other.num.padStart(4,'0')}0000`;
+                    stemsToTry.push(build(other.ssCode)); 
+                    if (other.ssName.includes("Generic")) { stemsToTry.push(build('3')); stemsToTry.push(build('4')); stemsToTry.push(build('2')); }
+                }
+
+                for (const stem of [...new Set(stemsToTry)]) {
+                    const range = await calculateIntersectionRange(routeFeatures, stem);
+                    if (range) {
+                        log(`--> Intersection Range: ${range.min.toFixed(3)} - ${range.max.toFixed(3)}`, 'success');
+                        ranges.push(range);
+                        break; 
+                    }
+                }
+            }
+            if (ranges.length >= 2) {
+                ranges.sort((a,b) => a.center - b.center);
+                let startM = ranges[0].max; let endM = ranges[ranges.length-1].min;     
+                if (startM > endM) { startM = ranges[0].min; endM = ranges[ranges.length-1].max; }
+                candidates.push({min: startM, max: endM, source:"Trimmed Intersections", priority: 20});
+            } else if (ranges.length === 1 && detectedOffset > 0) {
+                let start = ranges[0].center; 
+                let end = start + detectedOffset;
+                if (end > gMax) { log("Offset exceeds route end, trying reverse...", 'warning'); end = start - detectedOffset; }
+                if(start > end) { let temp=start; start=end; end=temp; }
+                candidates.push({min: start, max: end, source:"Intersection + Offset", priority: 25});
+            }
+        }
+
+        candidates.sort((a,b) => b.priority - a.priority);
+        if (candidates.length > 0) {
+            const winner = candidates[0];
+            beginInput.value = winner.min.toFixed(3);
+            endInput.value = winner.max.toFixed(3);
+            logicOut.innerHTML = `<span class='success'>✔ Found Measures via ${winner.source}.</span>`;
+            return;
+        }
+        beginInput.value = sanitize(gMin);
+        endInput.value = sanitize(gMax);
+        logicOut.innerHTML = `<span class='success'>✔ 'Whole Route' inferred (00 - End).</span>`;
+    }
+
+    async function calculateIntersectionRange(mainFeatures, otherStem) {
+        try {
+            const data = await executeLayerQuery(LRS_LAYER_URL, {
+                where: `CO_ROUTEID LIKE '${otherStem}%'`,
+                returnGeometry: true, returnM: false, outSR: 3857
+            });
+            if (!data.features || data.features.length===0) return null;
+            const mainPaths = mainFeatures[0].geometry.paths;
+            let hits = [];
+            for (const feat of data.features) {
+                const otherPaths = feat.geometry.paths;
+                for (const mPath of mainPaths) {
+                    for (const mPt of mPath) {
+                        const mx = mPt[0], my = mPt[1], mm = mPt[2]; 
+                        if (mm === undefined) continue;
+                        for (const oPath of otherPaths) {
+                            for (const oPt of oPath) {
+                                const dist = Math.sqrt(Math.pow(mx-oPt[0], 2) + Math.pow(my-oPt[1], 2));
+                                if (dist < 50) hits.push(mm); 
+                            }
+                        }
+                    }
+                }
+            }
+            if (hits.length === 0) return null;
+            hits.sort((a,b) => a-b);
+            return { min: hits[0], max: hits[hits.length-1], center: (hits[0]+hits[hits.length-1])/2 };
+        } catch(e) { return null; }
+    }
+
+    function renderTable(context) {
+        const table = document.getElementById('compTable');
+        const primary = context.candidates && context.candidates.length > 0 ? context.candidates[0] : { label: "None", num: "-" };
+        let countyHtml = `<td>${context.countyName || "Not Found"}</td><td>${context.countyCode || "ERR"}</td>`;
+        table.innerHTML = `<tr><th>Field</th><th>Value</th><th>Code</th></tr><tr><td>County</td>${countyHtml}</tr><tr><td>Sign System</td><td>${primary.ssName || "Auto"}</td><td>${primary.ssCode || "?"}</td></tr><tr><td>Route Num</td><td>${primary.label || "-"}</td><td>${primary.num || "-"}</td></tr>`;
+    }
+</script>
+
+</body>
+</html>
